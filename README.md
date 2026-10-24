@@ -56,15 +56,43 @@ GOOS=linux GOARCH=amd64 go build -o urlsync .
 
 Publishing a GitHub Release runs the release workflow, which tests the app, builds binaries for Linux, macOS, and Windows on amd64 and arm64, and uploads them with `SHA256SUMS.txt` to the release.
 
-## Linux systemd user timer
+## Linux systemd timer
 
-On Linux with systemd, run the built executable from the directory containing `settings.json`:
+On Linux with systemd, run the built executable from the directory containing `settings.json` to install a user timer:
 
 ```sh
 ./urlsync install-service --config settings.json --interval 15m
 ```
 
-This writes `urlsync.service` and `urlsync.timer` under `~/.config/systemd/user`, reloads the user systemd manager, and enables the timer. The service is a one-shot job, first scheduled one minute after boot and then at the configured interval. The command runs only when a download changes a file and all configured downloads succeed. This installs a user service; to keep it running when logged out, enable lingering with `loginctl enable-linger "$USER"`.
+This writes `urlsync.service` and `urlsync.timer` under `~/.config/systemd/user`, reloads the user systemd manager, and enables the timer. To install a system-wide timer instead, run the command as root and add `--system`:
+
+```sh
+sudo ./urlsync install-service --system --config /path/to/settings.json --interval 15m
+```
+
+System-wide units are written to `/etc/systemd/system` and managed by the system systemd instance. The service runs as root, so ensure the config, destination files, and any configured success command are appropriate for that account. The system-wide service requires `network-online.target`; user services do not depend on this system-level target. By default, the timer runs one minute after boot and then at the configured interval. Intervals support days as well as Go-style units, for example `--interval 2d12h`.
+
+Use `--name` to customize the generated service and timer names; it defaults to `urlsync` and should be provided without the `.service` or `.timer` suffix:
+
+```sh
+./urlsync install-service --name nightly-sync --config settings.json --interval 1d
+```
+
+Uninstall a user service and timer with:
+
+```sh
+./urlsync uninstall-service --name nightly-sync
+```
+
+Add `--system` (and run as root) to uninstall a system-wide unit. Uninstallation disables and stops the timer, stops the service if its unit file is present, removes the matching unit files, and reloads the systemd manager.
+
+To use a systemd calendar schedule instead of a repeating interval, pass an `OnCalendar` expression:
+
+```sh
+./urlsync install-service --config settings.json --on-calendar "Mon *-*-* 10:00:00"
+```
+
+`--interval` and `--on-calendar` are mutually exclusive. A calendar timer runs on the specified schedule without the additional one-minute boot run. Add `--randomized-delay 5m` to allow systemd to spread each timer activation across a random delay of up to five minutes; this option accepts seconds, minutes, hours, and days. The command runs only when a download changes a file and all configured downloads succeed. The user timer runs only while the user systemd manager is active; to keep it running when logged out, enable lingering with `loginctl enable-linger "$USER"`.
 
 ## AI Disclosure and Disclaimer
 

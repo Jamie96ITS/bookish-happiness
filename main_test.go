@@ -236,7 +236,7 @@ func TestRunSuccessCommand(t *testing.T) {
 func TestWriteServiceUnits(t *testing.T) {
 	unitDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "settings with spaces.json")
-	if err := writeServiceUnits(unitDir, "/opt/urlsync/urlsync", configPath, 90*time.Second); err != nil {
+	if err := writeServiceUnits(unitDir, "/opt/urlsync/urlsync", configPath, "urlsync", 90*time.Second, "", 0, true); err != nil {
 		t.Fatalf("writeServiceUnits returned an error: %v", err)
 	}
 
@@ -245,6 +245,8 @@ func TestWriteServiceUnits(t *testing.T) {
 		t.Fatalf("read service unit: %v", err)
 	}
 	for _, expected := range []string{
+		"Requires=network-online.target",
+		"After=network-online.target",
 		"Type=oneshot",
 		"ExecStart=\"/opt/urlsync/urlsync\" \"-config\" \"" + configPath + "\"",
 		"WorkingDirectory=\"" + filepath.Dir(configPath) + "\"",
@@ -262,5 +264,171 @@ func TestWriteServiceUnits(t *testing.T) {
 		if !strings.Contains(string(timer), expected) {
 			t.Errorf("timer unit does not contain %q", expected)
 		}
+	}
+}
+
+func TestWriteServiceUnitsMakesWorkingDirectoryAbsolute(t *testing.T) {
+	unitDir := t.TempDir()
+	configPath := filepath.Join("relative", "settings.json")
+	if err := writeServiceUnits(unitDir, "/opt/urlsync/urlsync", configPath, "urlsync", time.Minute, "", 0, false); err != nil {
+		t.Fatalf("writeServiceUnits returned an error: %v", err)
+	}
+
+	service, err := os.ReadFile(filepath.Join(unitDir, "urlsync.service"))
+	if err != nil {
+		t.Fatalf("read service unit: %v", err)
+	}
+	workingDirectory, err := filepath.Abs(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatalf("resolve expected working directory: %v", err)
+	}
+	expected := "WorkingDirectory=" + systemdQuote(workingDirectory)
+	if !strings.Contains(string(service), expected) {
+		t.Errorf("service unit does not contain absolute working directory %q", expected)
+	}
+	if strings.Contains(string(service), "network-online.target") {
+		t.Error("user service unexpectedly depends on the system network-online target")
+	}
+}
+
+func TestParseSystemdDuration(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{"2d", 48 * time.Hour},
+		{"2d12h30m", 60*time.Hour + 30*time.Minute},
+		{"1d2h", 26 * time.Hour},
+		{"15m", 15 * time.Minute},
+	} {
+		got, err := parseSystemdDuration(test.value)
+		if err != nil {
+			t.Errorf("parseSystemdDuration(%q) returned an error: %v", test.value, err)
+		} else if got != test.want {
+			t.Errorf("parseSystemdDuration(%q) = %v, want %v", test.value, got, test.want)
+		}
+	}
+}
+
+func TestWriteServiceUnitsCalendarAndRandomizedDelay(t *testing.T) {
+	unitDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "settings.json")
+	calendar := "Mon *-*-* 10:00:00"
+	if err := writeServiceUnits(unitDir, "/opt/urlsync/urlsync", configPath, "urlsync", 0, calendar, 90*time.Second, false); err != nil {
+		t.Fatalf("writeServiceUnits returned an error: %v", err)
+	}
+
+	timer, err := os.ReadFile(filepath.Join(unitDir, "urlsync.timer"))
+	if err != nil {
+		t.Fatalf("read timer unit: %v", err)
+	}
+	for _, expected := range []string{"OnCalendar=" + calendar, "RandomizedDelaySec=1min 30s"} {
+		if !strings.Contains(string(timer), expected) {
+			t.Errorf("timer unit does not contain %q", expected)
+		}
+	}
+	for _, unexpected := range []string{"OnBootSec=", "OnUnitActiveSec="} {
+		if strings.Contains(string(timer), unexpected) {
+			t.Errorf("calendar timer unexpectedly contains %q", unexpected)
+		}
+	}
+}
+
+func TestWriteServiceUnitsUsesCustomName(t *testing.T) {
+	unitDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := writeServiceUnits(unitDir, "/opt/urlsync/urlsync", configPath, "nightly-sync", time.Hour, "", 0, false); err != nil {
+		t.Fatalf("writeServiceUnits returned an error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(unitDir, "nightly-sync.service")); err != nil {
+		t.Fatalf("custom service file not found: %v", err)
+	}
+	timer, err := os.ReadFile(filepath.Join(unitDir, "nightly-sync.timer"))
+	if err != nil {
+		t.Fatalf("read custom timer unit: %v", err)
+	}
+	if !strings.Contains(string(timer), "Unit=nightly-sync.service") {
+		t.Error("custom timer does not point to custom service")
+	}
+}
+
+func TestWriteServiceUnitsDoesNotOverwriteExistingUnits(t *testing.T) {
+	for _, existingUnit := range []string{"backup.service", "backup.timer"} {
+		t.Run(existingUnit, func(t *testing.T) {
+			unitDir := t.TempDir()
+			configPath := filepath.Join(t.TempDir(), "settings.json")
+			existingPath := filepath.Join(unitDir, existingUnit)
+			existingContent := []byte("existing unit contents\n")
+			if err := os.WriteFile(existingPath, existingContent, 0o644); err != nil {
+				t.Fatalf("create existing unit: %v", err)
+			}
+
+			err := writeServiceUnits(unitDir, "/opt/urlsync/urlsync", configPath, "backup", time.Hour, "", 0, false)
+			if err == nil {
+				t.Fatal("writeServiceUnits succeeded despite an existing unit")
+			}
+			if content, readErr := os.ReadFile(existingPath); readErr != nil {
+				t.Fatalf("read existing unit: %v", readErr)
+			} else if string(content) != string(existingContent) {
+				t.Errorf("existing unit was changed: got %q", content)
+			}
+			if existingUnit == "backup.timer" {
+				if _, statErr := os.Stat(filepath.Join(unitDir, "backup.service")); !os.IsNotExist(statErr) {
+					t.Errorf("new service unit was not rolled back, stat error = %v", statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestRemoveServiceUnits(t *testing.T) {
+	unitDir := t.TempDir()
+	for _, filename := range []string{"backup.service", "backup.timer", "other.service"} {
+		if err := os.WriteFile(filepath.Join(unitDir, filename), []byte(filename), 0o644); err != nil {
+			t.Fatalf("create %s: %v", filename, err)
+		}
+	}
+
+	if err := removeServiceUnits(unitDir, "backup"); err != nil {
+		t.Fatalf("removeServiceUnits returned an error: %v", err)
+	}
+	for _, filename := range []string{"backup.service", "backup.timer"} {
+		if _, err := os.Stat(filepath.Join(unitDir, filename)); !os.IsNotExist(err) {
+			t.Errorf("%s was not removed, stat error = %v", filename, err)
+		}
+	}
+	if content, err := os.ReadFile(filepath.Join(unitDir, "other.service")); err != nil || string(content) != "other.service" {
+		t.Errorf("unrelated unit was changed: content %q, error %v", content, err)
+	}
+}
+
+func TestRemoveServiceUnitsReturnsErrorWhenNothingExists(t *testing.T) {
+	if err := removeServiceUnits(t.TempDir(), "missing"); err == nil {
+		t.Fatal("removeServiceUnits succeeded when no units existed")
+	}
+}
+
+func TestValidSystemdUnitName(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		valid bool
+	}{
+		{"urlsync", true},
+		{"nightly-sync_1", true},
+		{"", false},
+		{"../urlsync", false},
+		{".hidden", false},
+		{"urlsync.service", false},
+		{"urlsync.timer", false},
+	} {
+		if got := validSystemdUnitName(test.name); got != test.valid {
+			t.Errorf("validSystemdUnitName(%q) = %v, want %v", test.name, got, test.valid)
+		}
+	}
+}
+
+func TestSystemdDurationIncludesDays(t *testing.T) {
+	if got, want := systemdDuration(49*time.Hour+30*time.Minute), "2d 1h 30min"; got != want {
+		t.Errorf("systemdDuration() = %q, want %q", got, want)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -41,6 +42,12 @@ type Command struct {
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "install-service" {
 		if err := installServiceCommand(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "uninstall-service" {
+		if err := uninstallServiceCommand(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -92,17 +99,43 @@ func installServiceCommand(args []string) error {
 
 	flags := flag.NewFlagSet("install-service", flag.ContinueOnError)
 	configPath := flags.String("config", "settings.json", "path to the JSON settings file")
-	interval := flags.String("interval", "15m", "time between runs (for example 15m or 1h)")
+	name := flags.String("name", "urlsync", "base name for the generated systemd units")
+	interval := flags.String("interval", "", "time between runs (for example 15m, 1h, or 2d)")
+	onCalendar := flags.String("on-calendar", "", "systemd calendar schedule (for example daily or Mon *-*-* 10:00:00)")
+	randomizedDelay := flags.String("randomized-delay", "0s", "maximum randomized timer delay (for example 5m or 1h)")
+	system := flags.Bool("system", false, "install a system-wide service (requires root)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("install-service does not accept positional arguments")
 	}
+	if !validSystemdUnitName(*name) {
+		return fmt.Errorf("service name must start with a letter or digit and contain only letters, digits, '.', '_', '@', or '-' (without a .service or .timer suffix)")
+	}
 
-	duration, err := time.ParseDuration(*interval)
-	if err != nil || duration < time.Second || duration%time.Second != 0 {
-		return fmt.Errorf("interval must be a whole number of seconds, at least 1s")
+	if *interval != "" && *onCalendar != "" {
+		return fmt.Errorf("--interval and --on-calendar cannot be used together")
+	}
+	calendar := strings.TrimSpace(*onCalendar)
+	if strings.ContainsAny(calendar, "\r\n") {
+		return fmt.Errorf("--on-calendar must be a single-line systemd calendar expression")
+	}
+	var err error
+	var intervalDuration time.Duration
+	if calendar == "" {
+		intervalValue := *interval
+		if intervalValue == "" {
+			intervalValue = "15m"
+		}
+		intervalDuration, err = parseSystemdDuration(intervalValue)
+		if err != nil || intervalDuration < time.Second || intervalDuration%time.Second != 0 {
+			return fmt.Errorf("interval must be a whole number of seconds, at least 1s (for example 15m or 2d)")
+		}
+	}
+	randomizedDelayDuration, err := parseSystemdDuration(*randomizedDelay)
+	if err != nil || randomizedDelayDuration < 0 || randomizedDelayDuration%time.Second != 0 {
+		return fmt.Errorf("randomized delay must be a non-negative whole number of seconds")
 	}
 	absoluteConfig, err := filepath.Abs(*configPath)
 	if err != nil {
@@ -120,73 +153,281 @@ func installServiceCommand(args []string) error {
 	if err != nil {
 		return fmt.Errorf("locate executable: %w", err)
 	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return fmt.Errorf("locate user config directory: %w", err)
+	unitDir := "/etc/systemd/system"
+	systemctlArgs := []string{}
+	if !*system {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return fmt.Errorf("locate user config directory: %w", err)
+		}
+		unitDir = filepath.Join(configDir, "systemd", "user")
+		systemctlArgs = append(systemctlArgs, "--user")
 	}
-	unitDir := filepath.Join(configDir, "systemd", "user")
-	if err := writeServiceUnits(unitDir, executable, absoluteConfig, duration); err != nil {
+	if err := writeServiceUnits(unitDir, executable, absoluteConfig, *name, intervalDuration, calendar, randomizedDelayDuration, *system); err != nil {
 		return err
 	}
-	if err := runSystemctl("--user", "daemon-reload"); err != nil {
+	if err := runSystemctl(append(append([]string{}, systemctlArgs...), "daemon-reload")...); err != nil {
 		return err
 	}
-	if err := runSystemctl("--user", "enable", "--now", "urlsync.timer"); err != nil {
+	if err := runSystemctl(append(append([]string{}, systemctlArgs...), "enable", "--now", *name+".timer")...); err != nil {
 		return err
 	}
-	fmt.Printf("Installed and enabled user timer in %s\n", unitDir)
+	scope := "user"
+	if *system {
+		scope = "system"
+	}
+	fmt.Printf("Installed and enabled %s timer in %s\n", scope, unitDir)
 	return nil
 }
 
-func writeServiceUnits(unitDir, executable, configPath string, interval time.Duration) error {
+func uninstallServiceCommand(args []string) error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("uninstall-service is only supported on Linux with systemd")
+	}
+
+	flags := flag.NewFlagSet("uninstall-service", flag.ContinueOnError)
+	name := flags.String("name", "urlsync", "base name of the systemd units")
+	system := flags.Bool("system", false, "uninstall a system-wide service (requires root)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("uninstall-service does not accept positional arguments")
+	}
+	if !validSystemdUnitName(*name) {
+		return fmt.Errorf("service name must start with a letter or digit and contain only letters, digits, '.', '_', '@', or '-' (without a .service or .timer suffix)")
+	}
+
+	unitDir := "/etc/systemd/system"
+	systemctlArgs := []string{}
+	if !*system {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return fmt.Errorf("locate user config directory: %w", err)
+		}
+		unitDir = filepath.Join(configDir, "systemd", "user")
+		systemctlArgs = append(systemctlArgs, "--user")
+	}
+
+	servicePath := filepath.Join(unitDir, *name+".service")
+	timerPath := filepath.Join(unitDir, *name+".timer")
+	serviceExists, err := fileExists(servicePath)
+	if err != nil {
+		return fmt.Errorf("inspect service unit: %w", err)
+	}
+	timerExists, err := fileExists(timerPath)
+	if err != nil {
+		return fmt.Errorf("inspect timer unit: %w", err)
+	}
+	if !serviceExists && !timerExists {
+		return fmt.Errorf("no systemd units found for %q in %s", *name, unitDir)
+	}
+
+	if timerExists {
+		args := append(append([]string{}, systemctlArgs...), "disable", "--now", *name+".timer")
+		if err := runSystemctl(args...); err != nil {
+			return err
+		}
+	}
+	if serviceExists {
+		args := append(append([]string{}, systemctlArgs...), "stop", *name+".service")
+		if err := runSystemctl(args...); err != nil {
+			return err
+		}
+	}
+	if err := removeServiceUnits(unitDir, *name); err != nil {
+		return err
+	}
+	if err := runSystemctl(append(append([]string{}, systemctlArgs...), "daemon-reload")...); err != nil {
+		return err
+	}
+
+	scope := "user"
+	if *system {
+		scope = "system"
+	}
+	fmt.Printf("Uninstalled %s service and timer from %s\n", scope, unitDir)
+	return nil
+}
+
+func writeServiceUnits(unitDir, executable, configPath, name string, interval time.Duration, calendar string, randomizedDelay time.Duration, system bool) error {
+	if !validSystemdUnitName(name) {
+		return fmt.Errorf("invalid systemd service name %q", name)
+	}
+	workingDirectory, err := filepath.Abs(filepath.Dir(configPath))
+	if err != nil {
+		return fmt.Errorf("resolve service working directory: %w", err)
+	}
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		return fmt.Errorf("create systemd user unit directory: %w", err)
 	}
-	service := strings.Join([]string{
+	serviceLines := []string{
 		"[Unit]",
 		"Description=URL Sync download job",
+	}
+	if system {
+		serviceLines = append(serviceLines, "Requires=network-online.target", "After=network-online.target")
+	}
+	serviceLines = append(serviceLines,
 		"",
 		"[Service]",
 		"Type=oneshot",
-		"WorkingDirectory=" + systemdQuote(filepath.Dir(configPath)),
-		"ExecStart=" + strings.Join([]string{
+		"WorkingDirectory="+systemdQuote(workingDirectory),
+		"ExecStart="+strings.Join([]string{
 			systemdQuote(executable),
 			systemdQuote("-config"),
 			systemdQuote(configPath),
 		}, " "),
 		"TimeoutStartSec=infinity",
 		"",
-	}, "\n")
-	timer := strings.Join([]string{
+	)
+	service := strings.Join(serviceLines, "\n")
+	timerLines := []string{
 		"[Unit]",
 		"Description=Run URL Sync periodically",
 		"",
 		"[Timer]",
-		"OnBootSec=1min",
-		"OnUnitActiveSec=" + systemdDuration(interval),
+	}
+	if calendar != "" {
+		timerLines = append(timerLines, "OnCalendar="+strings.ReplaceAll(calendar, "%", "%%"))
+	} else {
+		timerLines = append(timerLines, "OnBootSec=1min", "OnUnitActiveSec="+systemdDuration(interval))
+	}
+	if randomizedDelay > 0 {
+		timerLines = append(timerLines, "RandomizedDelaySec="+systemdDuration(randomizedDelay))
+	}
+	timerLines = append(timerLines,
 		"Persistent=true",
-		"Unit=urlsync.service",
+		"Unit="+name+".service",
 		"",
+	)
+	timerLines = append(timerLines,
 		"[Install]",
 		"WantedBy=timers.target",
 		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(unitDir, "urlsync.service"), []byte(service), 0o644); err != nil {
-		return fmt.Errorf("write urlsync.service: %w", err)
+	)
+	timer := strings.Join(timerLines, "\n")
+	serviceFile := name + ".service"
+	servicePath := filepath.Join(unitDir, serviceFile)
+	if err := writeNewFile(servicePath, []byte(service)); err != nil {
+		return fmt.Errorf("write %s: %w", serviceFile, err)
 	}
-	if err := os.WriteFile(filepath.Join(unitDir, "urlsync.timer"), []byte(timer), 0o644); err != nil {
-		return fmt.Errorf("write urlsync.timer: %w", err)
+	timerFile := name + ".timer"
+	timerPath := filepath.Join(unitDir, timerFile)
+	if err := writeNewFile(timerPath, []byte(timer)); err != nil {
+		if removeErr := os.Remove(servicePath); removeErr != nil {
+			return errors.Join(fmt.Errorf("write %s: %w", timerFile, err), fmt.Errorf("remove newly created %s after failure: %w", serviceFile, removeErr))
+		}
+		return fmt.Errorf("write %s: %w", timerFile, err)
 	}
 	return nil
+}
+
+func removeServiceUnits(unitDir, name string) error {
+	if !validSystemdUnitName(name) {
+		return fmt.Errorf("invalid systemd service name %q", name)
+	}
+	paths := []string{
+		filepath.Join(unitDir, name+".service"),
+		filepath.Join(unitDir, name+".timer"),
+	}
+	removed := false
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", filepath.Base(path), err)
+		} else if err == nil {
+			removed = true
+		}
+	}
+	if !removed {
+		return fmt.Errorf("no systemd units found for %q in %s", name, unitDir)
+	}
+	return nil
+}
+
+func fileExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func writeNewFile(path string, content []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(content); err != nil {
+		closeErr := file.Close()
+		if removeErr := os.Remove(path); removeErr != nil {
+			return errors.Join(err, closeErr, fmt.Errorf("remove incomplete file: %w", removeErr))
+		}
+		return errors.Join(err, closeErr)
+	}
+	if err := file.Close(); err != nil {
+		if removeErr := os.Remove(path); removeErr != nil {
+			return errors.Join(err, fmt.Errorf("remove incomplete file: %w", removeErr))
+		}
+		return err
+	}
+	return nil
+}
+
+func validSystemdUnitName(name string) bool {
+	return systemdUnitNamePattern.MatchString(name) &&
+		!strings.HasSuffix(name, ".service") &&
+		!strings.HasSuffix(name, ".timer")
+}
+
+func parseSystemdDuration(value string) (time.Duration, error) {
+	if strings.Contains(value, "-") {
+		return 0, fmt.Errorf("negative durations are not supported")
+	}
+	dayMatches := systemdDayPattern.FindAllStringSubmatchIndex(value, -1)
+	var duration time.Duration
+	for _, match := range dayMatches {
+		days, err := strconv.ParseInt(value[match[2]:match[3]], 10, 64)
+		if err != nil || days > int64((1<<63-1)/int64(24*time.Hour)) {
+			return 0, fmt.Errorf("duration out of range")
+		}
+		dayDuration := time.Duration(days) * 24 * time.Hour
+		if duration > time.Duration(1<<63-1)-dayDuration {
+			return 0, fmt.Errorf("duration out of range")
+		}
+		duration += dayDuration
+	}
+	remainder := systemdDayPattern.ReplaceAllString(value, "")
+	if remainder != "" {
+		remainderDuration, err := time.ParseDuration(remainder)
+		if err != nil {
+			return 0, err
+		}
+		if duration > time.Duration(1<<63-1)-remainderDuration {
+			return 0, fmt.Errorf("duration out of range")
+		}
+		duration += remainderDuration
+	}
+	return duration, nil
 }
 
 func systemdQuote(value string) string {
 	return strings.ReplaceAll(strconv.Quote(value), "%", "%%")
 }
 
+var systemdDayPattern = regexp.MustCompile(`([0-9]+)d`)
+var systemdUnitNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]*$`)
+
 func systemdDuration(duration time.Duration) string {
 	seconds := int64(duration / time.Second)
 	var parts []string
+	if days := seconds / 86400; days > 0 {
+		parts = append(parts, strconv.FormatInt(days, 10)+"d")
+		seconds %= 86400
+	}
 	if hours := seconds / 3600; hours > 0 {
 		parts = append(parts, strconv.FormatInt(hours, 10)+"h")
 		seconds %= 3600
