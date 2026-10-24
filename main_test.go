@@ -252,7 +252,7 @@ func TestWriteServiceUnits(t *testing.T) {
 		"After=network-online.target",
 		"Type=oneshot",
 		"ExecStart=\"/opt/urlsync/urlsync\" \"-config\" \"" + configPath + "\"",
-		"WorkingDirectory=\"" + filepath.Dir(configPath) + "\"",
+		"WorkingDirectory=" + systemdPathEscape(filepath.Dir(configPath)),
 	} {
 		if !strings.Contains(string(service), expected) {
 			t.Errorf("service unit does not contain %q", expected)
@@ -285,12 +285,53 @@ func TestWriteServiceUnitsMakesWorkingDirectoryAbsolute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve expected working directory: %v", err)
 	}
-	expected := "WorkingDirectory=" + systemdQuote(workingDirectory)
+	expected := "WorkingDirectory=" + systemdPathEscape(workingDirectory)
 	if !strings.Contains(string(service), expected) {
 		t.Errorf("service unit does not contain absolute working directory %q", expected)
 	}
 	if strings.Contains(string(service), "network-online.target") {
 		t.Error("user service unexpectedly depends on the system network-online target")
+	}
+}
+
+func TestSystemdPathEscape(t *testing.T) {
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{"/tmp/path with spaces", `/tmp/path\x20with\x20spaces`},
+		{`/tmp/path "quoted"`, `/tmp/path\x20\x22quoted\x22`},
+		{`/tmp/back\slash`, `/tmp/back\x5cslash`},
+		{"/tmp/100%", `/tmp/100%%`},
+	} {
+		if got := systemdPathEscape(test.path); got != test.want {
+			t.Errorf("systemdPathEscape(%q) = %q, want %q", test.path, got, test.want)
+		}
+	}
+}
+
+func TestWriteServiceUnitsEscapesWorkingDirectory(t *testing.T) {
+	unitDir := t.TempDir()
+	configDir := filepath.Join(t.TempDir(), `directory "with spaces"`)
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	configPath := filepath.Join(configDir, "settings.json")
+	if err := writeServiceUnits(unitDir, "/opt/urlsync/urlsync", configPath, "urlsync", time.Minute, "", 0, false); err != nil {
+		t.Fatalf("writeServiceUnits returned an error: %v", err)
+	}
+	service, err := os.ReadFile(filepath.Join(unitDir, "urlsync.service"))
+	if err != nil {
+		t.Fatalf("read service unit: %v", err)
+	}
+	directive := "WorkingDirectory=" + systemdPathEscape(configDir)
+	if !strings.Contains(string(service), directive) {
+		t.Errorf("service unit does not contain escaped working directory %q", directive)
+	}
+	for _, line := range strings.Split(string(service), "\n") {
+		if strings.HasPrefix(line, "WorkingDirectory=") && strings.ContainsAny(line, `"'`) {
+			t.Errorf("WorkingDirectory contains literal quote characters: %q", line)
+		}
 	}
 }
 

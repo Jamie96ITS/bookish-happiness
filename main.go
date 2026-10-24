@@ -291,7 +291,7 @@ func writeServiceUnits(unitDir, executable, configPath, name string, interval ti
 		"",
 		"[Service]",
 		"Type=oneshot",
-		"WorkingDirectory="+systemdQuote(workingDirectory),
+		"WorkingDirectory="+systemdPathEscape(workingDirectory),
 		"ExecStart="+strings.Join([]string{
 			systemdQuote(executable),
 			systemdQuote("-config"),
@@ -751,6 +751,25 @@ func parseSystemdDuration(value string) (time.Duration, error) {
 
 func systemdQuote(value string) string {
 	return strings.ReplaceAll(strconv.Quote(value), "%", "%%")
+}
+
+func systemdPathEscape(path string) string {
+	var escaped strings.Builder
+	for i := 0; i < len(path); i++ {
+		switch path[i] {
+		case '%':
+			escaped.WriteString("%%")
+		case ' ', '"', '\\':
+			fmt.Fprintf(&escaped, `\x%02x`, path[i])
+		default:
+			if path[i] < 0x20 || path[i] == 0x7f {
+				fmt.Fprintf(&escaped, `\x%02x`, path[i])
+			} else {
+				escaped.WriteByte(path[i])
+			}
+		}
+	}
+	return escaped.String()
 }
 
 var systemdDayPattern = regexp.MustCompile(`([0-9]+)d`)
