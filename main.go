@@ -56,8 +56,20 @@ func main() {
 		return
 	}
 
+	flag.Usage = func() {
+		writeRootUsage(os.Stderr, filepath.Base(os.Args[0]))
+	}
 	configPath := flag.String("config", "settings.json", "path to the JSON settings file")
+	exampleConfig := flag.Bool("example-config", false, "create an example settings.json in the current directory")
 	flag.Parse()
+
+	if *exampleConfig {
+		if err := createExampleConfig("."); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("Created example settings.json")
+		return
+	}
 
 	config, err := loadConfig(*configPath)
 	if err != nil {
@@ -107,7 +119,16 @@ func installServiceCommand(args []string) error {
 	onCalendar := flags.String("on-calendar", "", "calendar schedule (for example daily or Mon *-*-* 10:00:00)")
 	randomizedDelay := flags.String("randomized-delay", "0s", "maximum randomized timer delay (for example 5m or 1h)")
 	system := flags.Bool("system", false, "install a system-wide service (requires root)")
+	flags.Usage = func() {
+		fmt.Fprintf(flags.Output(), "Usage: %s install-service [options]\n\nInstall a systemd timer on Linux or a Task Scheduler task on Windows.\n", filepath.Base(os.Args[0]))
+		flags.PrintDefaults()
+		fmt.Fprintln(flags.Output(), "\nOn Windows, tasks are created for the current user and prompt for its password. --system is unsupported.")
+		fmt.Fprintln(flags.Output(), "Windows supports whole-minute intervals under 24 hours, whole-day intervals up to 365 days, and a subset of calendar schedules.")
+	}
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if flags.NArg() != 0 {
@@ -197,7 +218,15 @@ func uninstallServiceCommand(args []string) error {
 	flags := flag.NewFlagSet("uninstall-service", flag.ContinueOnError)
 	name := flags.String("name", "urlsync", "base name of the systemd units")
 	system := flags.Bool("system", false, "uninstall a system-wide service (requires root)")
+	flags.Usage = func() {
+		fmt.Fprintf(flags.Output(), "Usage: %s uninstall-service [options]\n\nStop and remove an installed systemd service or Windows scheduled task.\n", filepath.Base(os.Args[0]))
+		flags.PrintDefaults()
+		fmt.Fprintln(flags.Output(), "\nOn Windows, removes a task for the current user; --system is unsupported.")
+	}
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if flags.NArg() != 0 {
@@ -801,6 +830,63 @@ func runSystemctl(args ...string) error {
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func writeRootUsage(output io.Writer, executable string) {
+	fmt.Fprintf(output, "Usage: %s [options]\n", executable)
+	fmt.Fprintf(output, "       %s install-service [options]\n", executable)
+	fmt.Fprintf(output, "       %s uninstall-service [options]\n\n", executable)
+	fmt.Fprintln(output, "Run configured downloads, or manage a scheduled service.")
+	fmt.Fprintln(output, "\nHelp:")
+	fmt.Fprintln(output, "  -h, -help                  show this help")
+	fmt.Fprintln(output, "\nOptions for normal runs:")
+	fmt.Fprintln(output, "  -config string")
+	fmt.Fprintln(output, "        path to the JSON settings file (default \"settings.json\")")
+	fmt.Fprintln(output, "  -example-config")
+	fmt.Fprintln(output, "        create an example settings.json in the current directory without overwriting")
+	fmt.Fprintln(output, "\ninstall-service options:")
+	fmt.Fprintln(output, "  -config path             settings file (default settings.json)")
+	fmt.Fprintln(output, "  -name name               service/task name (default urlsync)")
+	fmt.Fprintln(output, "  -interval duration       repeat interval; supports days (defaults to 15m without -on-calendar)")
+	fmt.Fprintln(output, "  -on-calendar expression  calendar schedule instead of -interval")
+	fmt.Fprintln(output, "  -randomized-delay time   maximum randomized delay (default 0s)")
+	fmt.Fprintln(output, "  -system                  install system-wide on Linux (requires root; unsupported on Windows)")
+	fmt.Fprintln(output, "  Windows tasks prompt for the current user's password to run while logged out.")
+	fmt.Fprintln(output, "\nuninstall-service options:")
+	fmt.Fprintln(output, "  -name name               service/task name to remove (default urlsync)")
+	fmt.Fprintln(output, "  -system                  remove system-wide service on Linux (requires root; unsupported on Windows)")
+	fmt.Fprintln(output, "\nUse 'install-service -help' or 'uninstall-service -help' for platform-specific details.")
+}
+
+func createExampleConfig(directory string) error {
+	const exampleConfig = `{
+  "ntfy_url": "",
+  "ntfy_prefix": "[urlsync] ",
+  "files": [
+    {
+      "url": "https://example.com/archive.zip",
+      "destination": "downloads/archive.zip",
+      "headers": {
+        "Authorization": "******",
+        "X-API-Key": "YOUR_API_KEY"
+      }
+    },
+    {
+      "url": "https://example.com/manifest.json",
+      "destination": "downloads/manifest.json",
+      "headers": {
+        "Authorization": "******",
+        "X-API-Key": "YOUR_API_KEY"
+      }
+    }
+  ]
+}
+`
+	path := filepath.Join(directory, "settings.json")
+	if err := writeNewFile(path, []byte(exampleConfig)); err != nil {
+		return fmt.Errorf("create example config %s: %w", path, err)
 	}
 	return nil
 }

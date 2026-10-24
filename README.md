@@ -8,6 +8,8 @@ When a response includes `Last-Modified`, the downloaded file receives that modi
 
 Edit `settings.json`:
 
+Create a starter example in the current directory with `./urlsync -example-config`. It creates `settings.json` only if the file does not already exist.
+
 ```json
 {
   "ntfy_url": "https://ntfy.sh/YOUR_TOPIC",

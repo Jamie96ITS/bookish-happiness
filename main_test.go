@@ -477,6 +477,70 @@ func TestSystemdDurationIncludesDays(t *testing.T) {
 	}
 }
 
+func TestRootUsageIncludesServiceOptions(t *testing.T) {
+	var output bytes.Buffer
+	writeRootUsage(&output, "urlsync")
+	for _, expected := range []string{
+		"install-service [options]",
+		"uninstall-service [options]",
+		"-config",
+		"-example-config",
+		"-name",
+		"-interval",
+		"-on-calendar",
+		"-randomized-delay",
+		"-system",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("root help does not contain %q", expected)
+		}
+	}
+}
+
+func TestCreateExampleConfig(t *testing.T) {
+	directory := t.TempDir()
+	if err := createExampleConfig(directory); err != nil {
+		t.Fatalf("createExampleConfig returned an error: %v", err)
+	}
+
+	path := filepath.Join(directory, "settings.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("example settings.json was not created: %v", err)
+	}
+	if _, err := loadConfig(path); err != nil {
+		t.Fatalf("example settings.json is invalid: %v", err)
+	}
+}
+
+func TestCreateExampleConfigDoesNotOverwrite(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "settings.json")
+	existingContent := []byte("keep this config\n")
+	if err := os.WriteFile(path, existingContent, 0o600); err != nil {
+		t.Fatalf("create existing config: %v", err)
+	}
+
+	if err := createExampleConfig(directory); err == nil {
+		t.Fatal("createExampleConfig succeeded despite an existing config")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read existing config: %v", err)
+	}
+	if string(content) != string(existingContent) {
+		t.Errorf("existing config was overwritten: got %q", content)
+	}
+}
+
+func TestServiceCommandsAcceptHelp(t *testing.T) {
+	if err := installServiceCommand([]string{"-help"}); err != nil {
+		t.Errorf("installServiceCommand -help returned an error: %v", err)
+	}
+	if err := uninstallServiceCommand([]string{"-help"}); err != nil {
+		t.Errorf("uninstallServiceCommand -help returned an error: %v", err)
+	}
+}
+
 func TestWindowsTaskSchedule(t *testing.T) {
 	now := time.Date(2026, time.October, 24, 21, 7, 0, 0, time.Local)
 	for _, test := range []struct {
