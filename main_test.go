@@ -552,6 +552,7 @@ func TestWindowsTaskXML(t *testing.T) {
 		`<Command>C:\Program Files\urlsync.exe</Command>`,
 		`settings &amp; data.json`,
 		`<UserId>`,
+		`<LogonType>Password</LogonType>`,
 	} {
 		if !strings.Contains(document, expected) {
 			t.Errorf("task definition does not contain %q", expected)

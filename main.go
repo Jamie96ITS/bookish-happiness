@@ -347,6 +347,10 @@ func installWindowsTask(name, executable, configPath string, interval time.Durat
 	if err != nil {
 		return err
 	}
+	account, err := user.Current()
+	if err != nil {
+		return fmt.Errorf("locate current user for scheduled task: %w", err)
+	}
 	taskName := windowsTaskName(name)
 	if err := runSchtasks("/Query", "/TN", taskName); err == nil {
 		return fmt.Errorf("scheduled task %q already exists; uninstall it before installing again", name)
@@ -368,7 +372,7 @@ func installWindowsTask(name, executable, configPath string, interval time.Durat
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close scheduled task definition: %w", err)
 	}
-	if err := runSchtasks("/Create", "/TN", taskName, "/XML", tempPath); err != nil {
+	if err := runSchtasksInteractive("/Create", "/TN", taskName, "/XML", tempPath, "/RU", account.Username, "/RP", "*"); err != nil {
 		return err
 	}
 	fmt.Printf("Installed current-user scheduled task %q\n", name)
@@ -401,7 +405,7 @@ func windowsTaskXML(name, executable, configPath string, interval time.Duration,
 		`<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` +
 		`<RegistrationInfo><Description>URL Sync scheduled download job</Description></RegistrationInfo>` +
 		`<Triggers>` + trigger + `</Triggers>` +
-		`<Principals><Principal id="Author"><UserId>` + xmlText(account.Username) + `</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>` +
+		`<Principals><Principal id="Author"><UserId>` + xmlText(account.Username) + `</UserId><LogonType>Password</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>` +
 		`<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>` +
 		`<Actions Context="Author"><Exec><Command>` + xmlText(executable) + `</Command><Arguments>` + xmlText(arguments) + `</Arguments><WorkingDirectory>` + xmlText(filepath.Dir(configPath)) + `</WorkingDirectory></Exec></Actions>` +
 		`</Task>`
@@ -639,6 +643,17 @@ func runSchtasks(args ...string) error {
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("schtasks %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func runSchtasksInteractive(args ...string) error {
+	command := exec.Command("schtasks.exe", args...)
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("schtasks %s failed: %w", strings.Join(args, " "), err)
 	}
 	return nil
 }

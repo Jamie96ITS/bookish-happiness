@@ -101,7 +101,7 @@ On Windows, the same commands install and remove a current-user task through Tas
 .\urlsync.exe uninstall-service --name urlsync
 ```
 
-Windows tasks run only while the current user is logged on; `--system` is not supported. Intervals must be whole minutes and are limited to intervals under 24 hours or whole-day intervals up to 365 days. Windows calendar schedules support `hourly`, `daily`, `midnight`, `weekly`, `monthly`, `yearly`/`annually`, and expressions such as `Mon,Tue *-*-* 10:00:00` or `*-*-15 08:30`. Other systemd calendar expressions are rejected with an error when they cannot be mapped to Task Scheduler. `--randomized-delay` is applied as the Task Scheduler trigger's random delay.
+Windows tasks are configured to run whether the current user is logged on or not. Installation prompts for that Windows account's password so Task Scheduler can use password-based logon, which allows the task to access network resources. Windows stores the credential with the task; reinstall the task if the account password changes. `--system` is not supported. Intervals must be whole minutes and are limited to intervals under 24 hours or whole-day intervals up to 365 days. Windows calendar schedules support `hourly`, `daily`, `midnight`, `weekly`, `monthly`, `yearly`/`annually`, and expressions such as `Mon,Tue *-*-* 10:00:00` or `*-*-15 08:30`. Other systemd calendar expressions are rejected with an error when they cannot be mapped to Task Scheduler. `--randomized-delay` is applied as the Task Scheduler trigger's random delay.
 
 ## AI Disclosure and Disclaimer
 
