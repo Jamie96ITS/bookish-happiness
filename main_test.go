@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 func TestDownloadFileUsesServerModificationTime(t *testing.T) {
@@ -430,5 +433,128 @@ func TestValidSystemdUnitName(t *testing.T) {
 func TestSystemdDurationIncludesDays(t *testing.T) {
 	if got, want := systemdDuration(49*time.Hour+30*time.Minute), "2d 1h 30min"; got != want {
 		t.Errorf("systemdDuration() = %q, want %q", got, want)
+	}
+}
+
+func TestWindowsTaskSchedule(t *testing.T) {
+	now := time.Date(2026, time.October, 24, 21, 7, 0, 0, time.Local)
+	for _, test := range []struct {
+		name              string
+		interval          time.Duration
+		calendar          string
+		randomizedDelay   time.Duration
+		wantBoundary      string
+		wantSchedule      string
+		wantRepetition    string
+		wantErrorContains string
+	}{
+		{
+			name:           "interval minutes",
+			interval:       90 * time.Minute,
+			wantBoundary:   "2026-10-24T21:08:00",
+			wantSchedule:   "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>",
+			wantRepetition: "<Interval>PT90M</Interval>",
+		},
+		{
+			name:         "interval days",
+			interval:     48 * time.Hour,
+			wantBoundary: "2026-10-24T21:08:00",
+			wantSchedule: "<ScheduleByDay><DaysInterval>2</DaysInterval></ScheduleByDay>",
+		},
+		{
+			name:         "weekdays",
+			calendar:     "Mon,Tue,Wed,Thu,Fri *-*-* 10:30",
+			wantBoundary: "2026-10-24T10:30:00",
+			wantSchedule: "<ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><Monday/><Tuesday/><Wednesday/><Thursday/><Friday/></DaysOfWeek></ScheduleByWeek>",
+		},
+		{
+			name:           "hourly alias",
+			calendar:       "hourly",
+			wantBoundary:   "2026-10-24T00:00:00",
+			wantSchedule:   "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>",
+			wantRepetition: "<Interval>PT1H</Interval>",
+		},
+		{
+			name:         "weekly alias",
+			calendar:     "weekly",
+			wantBoundary: "2026-10-24T00:00:00",
+			wantSchedule: "<ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><Monday/></DaysOfWeek></ScheduleByWeek>",
+		},
+		{
+			name:              "unsupported calendar",
+			calendar:          "Mon-Fri",
+			wantErrorContains: "unsupported Windows calendar expression",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			boundary, schedule, repetition, err := windowsTaskSchedule(test.interval, test.calendar, test.randomizedDelay, now)
+			if test.wantErrorContains != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErrorContains) {
+					t.Fatalf("windowsTaskSchedule error = %v, want it to contain %q", err, test.wantErrorContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("windowsTaskSchedule returned an error: %v", err)
+			}
+			if boundary != test.wantBoundary {
+				t.Errorf("start boundary = %q, want %q", boundary, test.wantBoundary)
+			}
+			if schedule != test.wantSchedule {
+				t.Errorf("schedule = %q, want %q", schedule, test.wantSchedule)
+			}
+			if test.wantRepetition != "" && !strings.Contains(repetition, test.wantRepetition) {
+				t.Errorf("repetition = %q, want it to contain %q", repetition, test.wantRepetition)
+			}
+		})
+	}
+}
+
+func TestWindowsQuoteArgument(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{"plain", "plain"},
+		{"with space", `"with space"`},
+		{`C:\some path\`, `"C:\some path\\"`},
+		{`say "hello"`, `"say \"hello\""`},
+	} {
+		if got := windowsQuoteArgument(test.input); got != test.want {
+			t.Errorf("windowsQuoteArgument(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+}
+
+func TestWindowsTaskXML(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "settings & data.json")
+	taskData, err := windowsTaskXML("nightly-sync", `C:\Program Files\urlsync.exe`, configPath, 24*time.Hour, "", 5*time.Minute, time.Date(2026, time.October, 24, 12, 0, 0, 0, time.Local))
+	if err != nil {
+		t.Fatalf("windowsTaskXML returned an error: %v", err)
+	}
+	if !bytes.HasPrefix(taskData, []byte{0xff, 0xfe}) {
+		t.Fatal("Task Scheduler XML does not have a UTF-16LE BOM")
+	}
+	encoded := make([]uint16, (len(taskData)-2)/2)
+	for i := range encoded {
+		encoded[i] = uint16(taskData[2+i*2]) | uint16(taskData[3+i*2])<<8
+	}
+	document := string(utf16.Decode(encoded))
+	document = strings.Replace(document, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
+	var task struct {
+		XMLName xml.Name `xml:"Task"`
+	}
+	if err := xml.Unmarshal([]byte(document), &task); err != nil {
+		t.Fatalf("generated task definition is invalid XML: %v", err)
+	}
+	for _, expected := range []string{
+		`<RandomDelay>PT5M</RandomDelay>`,
+		`<Command>C:\Program Files\urlsync.exe</Command>`,
+		`settings &amp; data.json`,
+		`<UserId>`,
+	} {
+		if !strings.Contains(document, expected) {
+			t.Errorf("task definition does not contain %q", expected)
+		}
 	}
 }

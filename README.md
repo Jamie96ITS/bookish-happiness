@@ -56,7 +56,7 @@ GOOS=linux GOARCH=amd64 go build -o urlsync .
 
 Publishing a GitHub Release runs the release workflow, which tests the app, builds binaries for Linux, macOS, and Windows on amd64 and arm64, and uploads them with `SHA256SUMS.txt` to the release.
 
-## Linux systemd timer
+## Scheduled service
 
 On Linux with systemd, run the built executable from the directory containing `settings.json` to install a user timer:
 
@@ -93,6 +93,15 @@ To use a systemd calendar schedule instead of a repeating interval, pass an `OnC
 ```
 
 `--interval` and `--on-calendar` are mutually exclusive. A calendar timer runs on the specified schedule without the additional one-minute boot run. Add `--randomized-delay 5m` to allow systemd to spread each timer activation across a random delay of up to five minutes; this option accepts seconds, minutes, hours, and days. The command runs only when a download changes a file and all configured downloads succeed. The user timer runs only while the user systemd manager is active; to keep it running when logged out, enable lingering with `loginctl enable-linger "$USER"`.
+
+On Windows, the same commands install and remove a current-user task through Task Scheduler:
+
+```powershell
+.\urlsync.exe install-service --config settings.json --interval 1d --randomized-delay 5m
+.\urlsync.exe uninstall-service --name urlsync
+```
+
+Windows tasks run only while the current user is logged on; `--system` is not supported. Intervals must be whole minutes and are limited to intervals under 24 hours or whole-day intervals up to 365 days. Windows calendar schedules support `hourly`, `daily`, `midnight`, `weekly`, `monthly`, `yearly`/`annually`, and expressions such as `Mon,Tue *-*-* 10:00:00` or `*-*-15 08:30`. Other systemd calendar expressions are rejected with an error when they cannot be mapped to Task Scheduler. `--randomized-delay` is applied as the Task Scheduler trigger's random delay.
 
 ## AI Disclosure and Disclaimer
 
