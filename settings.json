@@ -1,0 +1,21 @@
+{
+  "ntfy_url": "",
+  "files": [
+    {
+      "url": "https://example.com/archive.zip",
+      "destination": "downloads/archive.zip",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN",
+        "X-API-Key": "YOUR_API_KEY"
+      }
+    },
+    {
+      "url": "https://example.com/manifest.json",
+      "destination": "downloads/manifest.json",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN",
+        "X-API-Key": "YOUR_API_KEY"
+      }
+    }
+  ]
+}
