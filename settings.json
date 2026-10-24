@@ -1,5 +1,6 @@
 {
   "ntfy_url": "",
+  "ntfy_prefix": "[urlsync] ",
   "files": [
     {
       "url": "https://example.com/archive.zip",

@@ -21,9 +21,10 @@ import (
 )
 
 type Config struct {
-	Files     []Download `json:"files"`
-	NtfyURL   string     `json:"ntfy_url,omitempty"`
-	OnSuccess *Command   `json:"on_success,omitempty"`
+	Files      []Download `json:"files"`
+	NtfyURL    string     `json:"ntfy_url,omitempty"`
+	NtfyPrefix string     `json:"ntfy_prefix,omitempty"`
+	OnSuccess  *Command   `json:"on_success,omitempty"`
 }
 
 type Download struct {
@@ -61,7 +62,7 @@ func main() {
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", file.URL, err))
 			log.Printf("error: %s: %v", file.URL, err)
-			if notifyErr := notifyDownloadResult(context.Background(), client, config.NtfyURL, file, false, err); notifyErr != nil {
+			if notifyErr := notifyDownloadResult(context.Background(), client, config.NtfyURL, config.NtfyPrefix, file, false, err); notifyErr != nil {
 				log.Printf("ntfy notification failed: %v", notifyErr)
 			}
 			continue
@@ -72,7 +73,7 @@ func main() {
 		} else {
 			log.Printf("unchanged %s", file.URL)
 		}
-		if notifyErr := notifyDownloadResult(context.Background(), client, config.NtfyURL, file, updated, nil); notifyErr != nil {
+		if notifyErr := notifyDownloadResult(context.Background(), client, config.NtfyURL, config.NtfyPrefix, file, updated, nil); notifyErr != nil {
 			log.Printf("ntfy notification failed: %v", notifyErr)
 		}
 	}
@@ -263,7 +264,7 @@ func runSuccessCommand(ctx context.Context, command *Command, anyUpdated bool) e
 	return nil
 }
 
-func notifyDownloadResult(ctx context.Context, client *http.Client, ntfyURL string, file Download, updated bool, downloadErr error) error {
+func notifyDownloadResult(ctx context.Context, client *http.Client, ntfyURL, ntfyPrefix string, file Download, updated bool, downloadErr error) error {
 	if ntfyURL == "" || (!updated && downloadErr == nil) {
 		return nil
 	}
@@ -272,6 +273,7 @@ func notifyDownloadResult(ctx context.Context, client *http.Client, ntfyURL stri
 	if downloadErr != nil {
 		message = fmt.Sprintf("Download failed: %s", file.Destination)
 	}
+	message = ntfyPrefix + message
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, ntfyURL, bytes.NewBufferString(message))
 	if err != nil {
 		return fmt.Errorf("create ntfy request: %w", err)

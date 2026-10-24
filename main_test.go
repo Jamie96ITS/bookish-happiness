@@ -154,13 +154,13 @@ func TestNotifyDownloadResult(t *testing.T) {
 			name:         "changed file",
 			updated:      true,
 			wantNotified: true,
-			wantMessage:  "File updated: downloads/archive.zip",
+			wantMessage:  "[urlsync] File updated: downloads/archive.zip",
 		},
 		{
 			name:         "download error",
 			downloadErr:  errors.New("server unavailable"),
 			wantNotified: true,
-			wantMessage:  "Download failed: downloads/archive.zip",
+			wantMessage:  "[urlsync] Download failed: downloads/archive.zip",
 		},
 		{
 			name: "unchanged file",
@@ -185,7 +185,7 @@ func TestNotifyDownloadResult(t *testing.T) {
 			}))
 			defer server.Close()
 
-			err := notifyDownloadResult(context.Background(), server.Client(), server.URL, Download{
+			err := notifyDownloadResult(context.Background(), server.Client(), server.URL, "[urlsync] ", Download{
 				Destination: "downloads/archive.zip",
 			}, test.updated, test.downloadErr)
 			if err != nil {
