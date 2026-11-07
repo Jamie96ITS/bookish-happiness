@@ -68,7 +68,7 @@ GOOS=darwin GOARCH=arm64 go build -o urlsync .
 GOOS=linux GOARCH=amd64 go build -o urlsync .
 ```
 
-Publishing a GitHub Release runs the release workflow, which tests the app, builds binaries for Linux, macOS, and Windows on amd64 and arm64, and uploads them with `SHA256SUMS.txt` to the release.
+Publishing a GitHub Release runs the release workflow, which tests the app, builds binaries for Linux, macOS, and Windows on amd64 and arm64, and uploads them with `SHA256SUMS.txt` to the release. Release builds disable cgo, so Linux binaries do not depend on the build runner's glibc version and can run on older glibc systems such as Ubuntu 20.04.
 
 ## Scheduled service
 
