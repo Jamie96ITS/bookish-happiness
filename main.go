@@ -78,15 +78,14 @@ func main() {
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 	var failures []error
+	var notifications []string
 	anyUpdated := false
 	for _, file := range config.Files {
 		updated, err := downloadFile(context.Background(), client, file)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", file.URL, err))
 			log.Printf("error: %s: %v", file.URL, err)
-			if notifyErr := notifyDownloadResult(context.Background(), client, config.NtfyURL, config.NtfyPrefix, file, false, err); notifyErr != nil {
-				log.Printf("ntfy notification failed: %v", notifyErr)
-			}
+			notifications = append(notifications, downloadNotification(file, false, err))
 			continue
 		}
 		if updated {
@@ -95,15 +94,19 @@ func main() {
 		} else {
 			log.Printf("unchanged %s", file.URL)
 		}
-		if notifyErr := notifyDownloadResult(context.Background(), client, config.NtfyURL, config.NtfyPrefix, file, updated, nil); notifyErr != nil {
-			log.Printf("ntfy notification failed: %v", notifyErr)
+		if notification := downloadNotification(file, updated, nil); notification != "" {
+			notifications = append(notifications, notification)
 		}
 	}
-	if err := errors.Join(failures...); err != nil {
-		log.Fatal(err)
+	runErr := errors.Join(failures...)
+	if runErr == nil {
+		runErr = runSuccessCommand(context.Background(), config.OnSuccess, anyUpdated)
 	}
-	if err := runSuccessCommand(context.Background(), config.OnSuccess, anyUpdated); err != nil {
-		log.Fatal(err)
+	if notifyErr := notifyDownloadResults(context.Background(), client, config.NtfyURL, config.NtfyPrefix, notifications); notifyErr != nil {
+		log.Printf("ntfy notification failed: %v", notifyErr)
+	}
+	if runErr != nil {
+		log.Fatal(runErr)
 	}
 }
 
@@ -945,16 +948,23 @@ func runSuccessCommand(ctx context.Context, command *Command, anyUpdated bool) e
 	return nil
 }
 
-func notifyDownloadResult(ctx context.Context, client *http.Client, ntfyURL, ntfyPrefix string, file Download, updated bool, downloadErr error) error {
-	if ntfyURL == "" || (!updated && downloadErr == nil) {
+func downloadNotification(file Download, updated bool, downloadErr error) string {
+	if !updated && downloadErr == nil {
+		return ""
+	}
+
+	if downloadErr != nil {
+		return fmt.Sprintf("Download failed: %s", file.Destination)
+	}
+	return fmt.Sprintf("File updated: %s", file.Destination)
+}
+
+func notifyDownloadResults(ctx context.Context, client *http.Client, ntfyURL, ntfyPrefix string, notifications []string) error {
+	if ntfyURL == "" || len(notifications) == 0 {
 		return nil
 	}
 
-	message := fmt.Sprintf("File updated: %s", file.Destination)
-	if downloadErr != nil {
-		message = fmt.Sprintf("Download failed: %s", file.Destination)
-	}
-	message = ntfyPrefix + message
+	message := ntfyPrefix + strings.Join(notifications, "\n")
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, ntfyURL, bytes.NewBufferString(message))
 	if err != nil {
 		return fmt.Errorf("create ntfy request: %w", err)

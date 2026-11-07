@@ -34,9 +34,9 @@ Create a starter example in the current directory with `./urlsync -example-confi
 Destinations may be relative to the current working directory or absolute paths. Parent directories are created as needed.
 The optional `headers` object sends the listed HTTP headers with that URL's request. Store credentials outside version control and replace the example placeholders before use. `urlsync` sets `If-Modified-Since` itself when a destination already exists.
 
-Set the optional global `ntfy_url` to your ntfy.sh topic URL to receive a message when a file is updated or a download fails. No notification is sent when a file is unchanged. Leave it empty to disable notifications. Notification delivery errors are logged locally.
+Set the optional global `ntfy_url` to your ntfy.sh topic URL to receive one message at the end of each run listing updated files and download failures. Each result appears on its own line. No notification is sent if all files are unchanged. Leave it empty to disable notifications. Notification delivery errors are logged locally.
 
-The optional global `ntfy_prefix` is prepended literally to every ntfy message, including update and error notices. Include any desired spacing in the prefix; it defaults to an empty string.
+The optional global `ntfy_prefix` is prepended literally once to the combined ntfy message. Include any desired spacing in the prefix; it defaults to an empty string.
 
 Set the optional global `on_success` command to run a program after all downloads succeed and at least one file is updated. For example, the configuration above restarts nginx. The command runs once per invocation, directly without a shell; use `command` for the executable and `args` for its arguments. It is not run when files are unchanged or any download fails. A non-zero command exit causes `urlsync` to exit with an error.
 

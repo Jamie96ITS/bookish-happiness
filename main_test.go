@@ -145,25 +145,27 @@ func TestDownloadFileHandlesNotModified(t *testing.T) {
 	}
 }
 
-func TestNotifyDownloadResult(t *testing.T) {
+func TestNotifyDownloadResults(t *testing.T) {
 	tests := []struct {
-		name         string
-		updated      bool
-		downloadErr  error
-		wantNotified bool
-		wantMessage  string
+		name          string
+		notifications []string
+		wantNotified  bool
+		wantMessage   string
 	}{
 		{
-			name:         "changed file",
-			updated:      true,
-			wantNotified: true,
-			wantMessage:  "[urlsync] File updated: downloads/archive.zip",
+			name:          "changed file",
+			notifications: []string{"File updated: downloads/archive.zip"},
+			wantNotified:  true,
+			wantMessage:   "[urlsync] File updated: downloads/archive.zip",
 		},
 		{
-			name:         "download error",
-			downloadErr:  errors.New("server unavailable"),
+			name: "combined results",
+			notifications: []string{
+				"File updated: downloads/archive.zip",
+				"Download failed: downloads/another.zip",
+			},
 			wantNotified: true,
-			wantMessage:  "[urlsync] Download failed: downloads/archive.zip",
+			wantMessage:  "[urlsync] File updated: downloads/archive.zip\nDownload failed: downloads/another.zip",
 		},
 		{
 			name: "unchanged file",
@@ -188,17 +190,47 @@ func TestNotifyDownloadResult(t *testing.T) {
 			}))
 			defer server.Close()
 
-			err := notifyDownloadResult(context.Background(), server.Client(), server.URL, "[urlsync] ", Download{
-				Destination: "downloads/archive.zip",
-			}, test.updated, test.downloadErr)
+			err := notifyDownloadResults(context.Background(), server.Client(), server.URL, "[urlsync] ", test.notifications)
 			if err != nil {
-				t.Fatalf("notifyDownloadResult returned an error: %v", err)
+				t.Fatalf("notifyDownloadResults returned an error: %v", err)
 			}
 			if called != test.wantNotified {
 				t.Fatalf("notification sent = %t, want %t", called, test.wantNotified)
 			}
 			if gotMessage != test.wantMessage {
 				t.Fatalf("notification message = %q, want %q", gotMessage, test.wantMessage)
+			}
+		})
+	}
+}
+
+func TestDownloadNotification(t *testing.T) {
+	tests := []struct {
+		name        string
+		updated     bool
+		downloadErr error
+		want        string
+	}{
+		{
+			name:    "updated",
+			updated: true,
+			want:    "File updated: downloads/archive.zip",
+		},
+		{
+			name:        "failed",
+			downloadErr: errors.New("server unavailable"),
+			want:        "Download failed: downloads/archive.zip",
+		},
+		{
+			name: "unchanged",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := downloadNotification(Download{Destination: "downloads/archive.zip"}, test.updated, test.downloadErr)
+			if got != test.want {
+				t.Fatalf("downloadNotification() = %q, want %q", got, test.want)
 			}
 		})
 	}
