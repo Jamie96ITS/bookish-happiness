@@ -37,11 +37,17 @@ type Download struct {
 	Headers            map[string]string `json:"headers,omitempty"`
 	MinCheckInterval   string            `json:"min_check_interval,omitempty"`
 	AcceptableFailures int               `json:"acceptable_failures,omitempty"`
+	OnSuccess          *Command          `json:"on_success,omitempty"`
 }
 
 type checkState struct {
 	LastChecked         time.Time `json:"last_checked,omitempty"`
 	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
+}
+
+type fileSuccessCommand struct {
+	command     *Command
+	destination string
 }
 
 type Command struct {
@@ -86,6 +92,7 @@ func main() {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	var failures []error
 	var notifications []string
+	var fileSuccessCommands []fileSuccessCommand
 	anyUpdated := false
 	checkStore := map[string]checkState{}
 	statePath := *configPath + ".state.json"
@@ -134,6 +141,12 @@ func main() {
 			if updated {
 				anyUpdated = true
 				log.Printf("updated %s -> %s", file.URL, file.Destination)
+				if file.OnSuccess != nil {
+					fileSuccessCommands = append(fileSuccessCommands, fileSuccessCommand{
+						command:     file.OnSuccess,
+						destination: file.Destination,
+					})
+				}
 			} else {
 				log.Printf("unchanged %s", file.URL)
 			}
@@ -149,10 +162,17 @@ func main() {
 			}
 		}
 	}
-	runErr := errors.Join(failures...)
-	if runErr == nil {
-		runErr = runSuccessCommand(context.Background(), config.OnSuccess, anyUpdated)
+	downloadErr := errors.Join(failures...)
+	var commandErrors []error
+	if err := runFileSuccessCommands(context.Background(), fileSuccessCommands); err != nil {
+		commandErrors = append(commandErrors, err)
 	}
+	if downloadErr == nil {
+		if err := runSuccessCommand(context.Background(), config.OnSuccess, anyUpdated); err != nil {
+			commandErrors = append(commandErrors, err)
+		}
+	}
+	runErr := errors.Join(downloadErr, errors.Join(commandErrors...))
 	if notifyErr := notifyDownloadResults(context.Background(), client, config.NtfyURL, config.NtfyPrefix, notifications); notifyErr != nil {
 		log.Printf("ntfy notification failed: %v", notifyErr)
 	}
@@ -989,6 +1009,9 @@ func loadConfig(path string) (Config, error) {
 		if file.AcceptableFailures < 0 {
 			return Config{}, fmt.Errorf("parse config: files[%d].acceptable_failures must not be negative", i)
 		}
+		if file.OnSuccess != nil && file.OnSuccess.Command == "" {
+			return Config{}, fmt.Errorf("parse config: files[%d].on_success.command must not be empty", i)
+		}
 	}
 	return config, nil
 }
@@ -1080,11 +1103,25 @@ func runSuccessCommand(ctx context.Context, command *Command, anyUpdated bool) e
 		return nil
 	}
 
+	return runCommand(ctx, command, "run on_success command")
+}
+
+func runFileSuccessCommands(ctx context.Context, commands []fileSuccessCommand) error {
+	var failures []error
+	for _, fileCommand := range commands {
+		if err := runCommand(ctx, fileCommand.command, fmt.Sprintf("run on_success command for %s", fileCommand.destination)); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func runCommand(ctx context.Context, command *Command, description string) error {
 	process := exec.CommandContext(ctx, command.Command, command.Args...)
 	process.Stdout = os.Stdout
 	process.Stderr = os.Stderr
 	if err := process.Run(); err != nil {
-		return fmt.Errorf("run on_success command: %w", err)
+		return fmt.Errorf("%s: %w", description, err)
 	}
 	return nil
 }

@@ -410,6 +410,41 @@ func TestRunSuccessCommand(t *testing.T) {
 	}
 }
 
+func TestRunFileSuccessCommands(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "file-command-ran")
+	t.Setenv("URLSYNC_TEST_COMMAND_MARKER", marker)
+	command := &Command{
+		Command: os.Args[0],
+		Args:    []string{"-test.run=^TestRunSuccessCommand$"},
+	}
+
+	err := runFileSuccessCommands(context.Background(), []fileSuccessCommand{
+		{command: &Command{Command: "missing-urlsync-command"}, destination: "first.zip"},
+		{command: command, destination: "archive.zip"},
+	})
+	if err == nil {
+		t.Fatal("runFileSuccessCommands succeeded despite a command failure")
+	}
+	if !strings.Contains(err.Error(), "first.zip") {
+		t.Errorf("command error = %v, want destination context", err)
+	}
+	if data, readErr := os.ReadFile(marker); readErr != nil || string(data) != "ran" {
+		t.Fatalf("file command marker = %q, error = %v", data, readErr)
+	}
+}
+
+func TestLoadConfigRejectsEmptyFileSuccessCommand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	config := `{"files":[{"url":"https://example.com/archive.zip","destination":"archive.zip","on_success":{"command":""}}]}`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "files[0].on_success.command") {
+		t.Fatalf("loadConfig error = %v, want per-file on_success validation error", err)
+	}
+}
+
 func TestWriteServiceUnits(t *testing.T) {
 	unitDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "settings with spaces.json")

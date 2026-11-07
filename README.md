@@ -24,6 +24,10 @@ Create a starter example in the current directory with `./urlsync -example-confi
       "destination": "downloads/archive.zip",
       "min_check_interval": "6h",
       "acceptable_failures": 2,
+      "on_success": {
+        "command": "process-archive",
+        "args": ["downloads/archive.zip"]
+      },
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN",
         "X-API-Key": "YOUR_API_KEY"
@@ -40,11 +44,13 @@ Set an optional per-file `min_check_interval` to a Go duration such as `"30m"` o
 
 Set an optional per-file `acceptable_failures` to a non-negative integer. The default, `0`, sends a notification on every failed check. A value of `2` tolerates the first two consecutive failures and sends a notification starting with the third; a successful check resets the failure count. Counts are stored in the same JSON state file.
 
+Each file may have its own optional `on_success` command with the same `command` and `args` shape as the global setting. It runs when that file is updated, even if another file's download fails. Commands run directly without a shell. The global `on_success` command still runs only when all downloads succeed and at least one file is updated. Any command failure causes `urlsync` to exit with an error.
+
 Set the optional global `ntfy_url` to your ntfy.sh topic URL to receive one message at the end of each run listing updated files and download failures. Each result appears on its own line. No notification is sent if all files are unchanged. Leave it empty to disable notifications. Notification delivery errors are logged locally.
 
 The optional global `ntfy_prefix` is prepended literally once to the combined ntfy message. Include any desired spacing in the prefix; it defaults to an empty string.
 
-Set the optional global `on_success` command to run a program after all downloads succeed and at least one file is updated. For example, the configuration above restarts nginx. The command runs once per invocation, directly without a shell; use `command` for the executable and `args` for its arguments. It is not run when files are unchanged or any download fails. A non-zero command exit causes `urlsync` to exit with an error.
+Set the optional global `on_success` command to run a program after all downloads succeed and at least one file is updated. For example, the configuration above restarts nginx. The command runs once per invocation, directly without a shell; use `command` for the executable and `args` for its arguments. It is not run when files are unchanged or any download fails.
 
 ## Run
 
