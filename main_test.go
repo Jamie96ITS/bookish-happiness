@@ -228,9 +228,151 @@ func TestDownloadNotification(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := downloadNotification(Download{Destination: "downloads/archive.zip"}, test.updated, test.downloadErr)
+			got := downloadNotification(Download{Destination: "downloads/archive.zip"}, test.updated, test.downloadErr, true)
 			if got != test.want {
 				t.Fatalf("downloadNotification() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestShouldSkipCheck(t *testing.T) {
+	now := time.Date(2026, time.November, 7, 3, 0, 0, 0, time.UTC)
+	file := Download{
+		URL:              "https://example.com/archive.zip",
+		Destination:      "downloads/archive.zip",
+		MinCheckInterval: "1h",
+	}
+	store := map[string]checkState{
+		checkStoreID(file): {LastChecked: now.Add(-time.Hour)},
+	}
+
+	for _, test := range []struct {
+		name        string
+		file        Download
+		lastChecked time.Time
+		wantSkip    bool
+		wantError   bool
+	}{
+		{
+			name:        "interval has not elapsed",
+			file:        file,
+			lastChecked: now.Add(-time.Minute),
+			wantSkip:    true,
+		},
+		{
+			name:        "interval has elapsed",
+			file:        file,
+			lastChecked: now.Add(-time.Hour),
+		},
+		{
+			name: "no minimum interval",
+			file: Download{URL: file.URL, Destination: file.Destination},
+		},
+		{
+			name:      "invalid interval",
+			file:      Download{URL: file.URL, Destination: file.Destination, MinCheckInterval: "soon"},
+			wantError: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checks := store
+			if !test.lastChecked.IsZero() {
+				checks = map[string]checkState{checkStoreID(test.file): {LastChecked: test.lastChecked}}
+			}
+			got, err := shouldSkipCheck(test.file, checks, now)
+			if (err != nil) != test.wantError {
+				t.Fatalf("shouldSkipCheck() error = %v, wantError %t", err, test.wantError)
+			}
+			if got != test.wantSkip {
+				t.Errorf("shouldSkipCheck() = %t, want %t", got, test.wantSkip)
+			}
+		})
+	}
+}
+
+func TestCheckStoreRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json.state.json")
+	checkedAt := time.Date(2026, time.November, 7, 3, 0, 0, 0, time.UTC)
+	want := map[string]checkState{
+		checkStoreID(Download{URL: "https://example.com/archive.zip", Destination: "archive.zip"}): {
+			LastChecked:         checkedAt,
+			ConsecutiveFailures: 2,
+		},
+	}
+
+	if err := saveCheckStore(path, want); err != nil {
+		t.Fatalf("saveCheckStore returned an error: %v", err)
+	}
+	got, err := loadCheckStore(path)
+	if err != nil {
+		t.Fatalf("loadCheckStore returned an error: %v", err)
+	}
+	for key, wantTime := range want {
+		if gotState, exists := got[key]; !exists || !gotState.LastChecked.Equal(wantTime.LastChecked) || gotState.ConsecutiveFailures != wantTime.ConsecutiveFailures {
+			t.Errorf("loaded state for %q = %v, want %v", key, gotState, wantTime)
+		}
+	}
+}
+
+func TestDownloadNotificationHonorsAcceptableFailures(t *testing.T) {
+	file := Download{Destination: "downloads/archive.zip", AcceptableFailures: 2}
+	failure := errors.New("server unavailable")
+	state := checkState{}
+	for failures := 1; failures <= 3; failures++ {
+		var notification string
+		state, notification = recordDownloadResult(file, state, false, failure)
+		wantNotification := ""
+		if failures == 3 {
+			wantNotification = "Download failed: downloads/archive.zip"
+		}
+		if notification != wantNotification {
+			t.Errorf("notification after %d failures = %q, want %q", failures, notification, wantNotification)
+		}
+	}
+	if state.ConsecutiveFailures != 3 {
+		t.Errorf("consecutive failures = %d, want 3", state.ConsecutiveFailures)
+	}
+
+	state, notification := recordDownloadResult(file, state, false, nil)
+	if notification != "" {
+		t.Errorf("unchanged success notification = %q, want empty", notification)
+	}
+	if state.ConsecutiveFailures != 0 {
+		t.Errorf("consecutive failures after success = %d, want 0", state.ConsecutiveFailures)
+	}
+
+	state, notification = recordDownloadResult(Download{Destination: file.Destination}, checkState{}, false, failure)
+	if notification != "Download failed: downloads/archive.zip" {
+		t.Errorf("default failure notification = %q, want immediate notification", notification)
+	}
+}
+
+func TestLoadCheckStoreMigratesLegacyTimestamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	const key = "archive"
+	if err := os.WriteFile(path, []byte(`{"archive":"2026-11-07T03:00:00Z"}`), 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	store, err := loadCheckStore(path)
+	if err != nil {
+		t.Fatalf("loadCheckStore returned an error: %v", err)
+	}
+	state, exists := store[key]
+	if !exists || !state.LastChecked.Equal(time.Date(2026, time.November, 7, 3, 0, 0, 0, time.UTC)) {
+		t.Errorf("migrated state = %v, want legacy timestamp", state)
+	}
+}
+
+func TestLoadCheckStoreRejectsInvalidData(t *testing.T) {
+	for _, data := range []string{"{", "null", "[]"} {
+		t.Run(data, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatalf("write invalid state: %v", err)
+			}
+			if _, err := loadCheckStore(path); err == nil {
+				t.Fatal("loadCheckStore succeeded with invalid state")
 			}
 		})
 	}

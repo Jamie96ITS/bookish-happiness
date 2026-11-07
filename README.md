@@ -22,6 +22,8 @@ Create a starter example in the current directory with `./urlsync -example-confi
     {
       "url": "https://example.com/archive.zip",
       "destination": "downloads/archive.zip",
+      "min_check_interval": "6h",
+      "acceptable_failures": 2,
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN",
         "X-API-Key": "YOUR_API_KEY"
@@ -33,6 +35,10 @@ Create a starter example in the current directory with `./urlsync -example-confi
 
 Destinations may be relative to the current working directory or absolute paths. Parent directories are created as needed.
 The optional `headers` object sends the listed HTTP headers with that URL's request. Store credentials outside version control and replace the example placeholders before use. `urlsync` sets `If-Modified-Since` itself when a destination already exists.
+
+Set an optional per-file `min_check_interval` to a Go duration such as `"30m"` or `"6h"`. A file is skipped until that interval has elapsed since its last check attempt. Attempts, including failed downloads, are recorded in a JSON state file next to the config (for `settings.json`, `settings.json.state.json`); the file is created when an interval is configured. Keep this state file between runs so the intervals persist.
+
+Set an optional per-file `acceptable_failures` to a non-negative integer. The default, `0`, sends a notification on every failed check. A value of `2` tolerates the first two consecutive failures and sends a notification starting with the third; a successful check resets the failure count. Counts are stored in the same JSON state file.
 
 Set the optional global `ntfy_url` to your ntfy.sh topic URL to receive one message at the end of each run listing updated files and download failures. Each result appears on its own line. No notification is sent if all files are unchanged. Leave it empty to disable notifications. Notification delivery errors are logged locally.
 

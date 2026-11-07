@@ -5,6 +5,8 @@
     {
       "url": "https://example.com/archive.zip",
       "destination": "downloads/archive.zip",
+      "min_check_interval": "6h",
+      "acceptable_failures": 2,
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN",
         "X-API-Key": "YOUR_API_KEY"
@@ -13,6 +15,8 @@
     {
       "url": "https://example.com/manifest.json",
       "destination": "downloads/manifest.json",
+      "min_check_interval": "6h",
+      "acceptable_failures": 2,
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN",
         "X-API-Key": "YOUR_API_KEY"

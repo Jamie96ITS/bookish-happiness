@@ -32,9 +32,16 @@ type Config struct {
 }
 
 type Download struct {
-	URL         string            `json:"url"`
-	Destination string            `json:"destination"`
-	Headers     map[string]string `json:"headers,omitempty"`
+	URL                string            `json:"url"`
+	Destination        string            `json:"destination"`
+	Headers            map[string]string `json:"headers,omitempty"`
+	MinCheckInterval   string            `json:"min_check_interval,omitempty"`
+	AcceptableFailures int               `json:"acceptable_failures,omitempty"`
+}
+
+type checkState struct {
+	LastChecked         time.Time `json:"last_checked,omitempty"`
+	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
 }
 
 type Command struct {
@@ -80,22 +87,66 @@ func main() {
 	var failures []error
 	var notifications []string
 	anyUpdated := false
+	checkStore := map[string]checkState{}
+	statePath := *configPath + ".state.json"
 	for _, file := range config.Files {
-		updated, err := downloadFile(context.Background(), client, file)
+		if file.MinCheckInterval != "" || file.AcceptableFailures > 0 {
+			var err error
+			checkStore, err = loadCheckStore(statePath)
+			if err != nil {
+				log.Fatal(err)
+			}
+			break
+		}
+	}
+	for _, file := range config.Files {
+		skip, err := shouldSkipCheck(file, checkStore, time.Now().UTC())
 		if err != nil {
-			failures = append(failures, fmt.Errorf("%s: %w", file.URL, err))
-			log.Printf("error: %s: %v", file.URL, err)
-			notifications = append(notifications, downloadNotification(file, false, err))
+			checkErr := fmt.Errorf("invalid minimum check interval for %s: %w", file.URL, err)
+			failures = append(failures, checkErr)
+			log.Printf("error: %v", checkErr)
 			continue
 		}
-		if updated {
-			anyUpdated = true
-			log.Printf("updated %s -> %s", file.URL, file.Destination)
-		} else {
-			log.Printf("unchanged %s", file.URL)
+		if skip {
+			log.Printf("skipped %s (minimum check interval has not elapsed)", file.URL)
+			continue
 		}
-		if notification := downloadNotification(file, updated, nil); notification != "" {
+		if file.MinCheckInterval != "" {
+			id := checkStoreID(file)
+			now := time.Now().UTC()
+			state := checkStore[id]
+			state.LastChecked = now
+			checkStore[id] = state
+			if err := saveCheckStore(statePath, checkStore); err != nil {
+				failures = append(failures, fmt.Errorf("record last check for %s: %w", file.URL, err))
+				log.Printf("error: could not record last check for %s: %v", file.URL, err)
+				continue
+			}
+		}
+		updated, downloadErr := downloadFile(context.Background(), client, file)
+		id := checkStoreID(file)
+		state, notification := recordDownloadResult(file, checkStore[id], updated, downloadErr)
+		checkStore[id] = state
+		if downloadErr != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", file.URL, downloadErr))
+			log.Printf("error: %s: %v", file.URL, downloadErr)
+		} else {
+			if updated {
+				anyUpdated = true
+				log.Printf("updated %s -> %s", file.URL, file.Destination)
+			} else {
+				log.Printf("unchanged %s", file.URL)
+			}
+		}
+		if notification != "" {
 			notifications = append(notifications, notification)
+		}
+		if file.MinCheckInterval != "" || file.AcceptableFailures > 0 {
+			if err := saveCheckStore(statePath, checkStore); err != nil {
+				storeErr := fmt.Errorf("record result for %s: %w", file.URL, err)
+				failures = append(failures, storeErr)
+				log.Printf("error: %v", storeErr)
+			}
 		}
 	}
 	runErr := errors.Join(failures...)
@@ -871,6 +922,8 @@ func createExampleConfig(directory string) error {
     {
       "url": "https://example.com/archive.zip",
       "destination": "downloads/archive.zip",
+      "min_check_interval": "6h",
+      "acceptable_failures": 0,
       "headers": {
         "Authorization": "******",
         "X-API-Key": "YOUR_API_KEY"
@@ -930,8 +983,96 @@ func loadConfig(path string) (Config, error) {
 		if file.Destination == "" {
 			return Config{}, fmt.Errorf("parse config: files[%d].destination must not be empty", i)
 		}
+		if _, err := parseMinCheckInterval(file.MinCheckInterval); err != nil {
+			return Config{}, fmt.Errorf("parse config: files[%d].min_check_interval: %w", i, err)
+		}
+		if file.AcceptableFailures < 0 {
+			return Config{}, fmt.Errorf("parse config: files[%d].acceptable_failures must not be negative", i)
+		}
 	}
 	return config, nil
+}
+
+func parseMinCheckInterval(value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	interval, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("must be a valid duration (for example 30m or 6h): %w", err)
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("must be greater than zero")
+	}
+	return interval, nil
+}
+
+func checkStoreID(file Download) string {
+	return strconv.Quote(file.URL) + ":" + strconv.Quote(file.Destination)
+}
+
+func shouldSkipCheck(file Download, store map[string]checkState, now time.Time) (bool, error) {
+	interval, err := parseMinCheckInterval(file.MinCheckInterval)
+	if err != nil {
+		return false, err
+	}
+	state, exists := store[checkStoreID(file)]
+	return exists && now.Sub(state.LastChecked) < interval, nil
+}
+
+func loadCheckStore(path string) (map[string]checkState, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]checkState{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read check state: %w", err)
+	}
+
+	var rawStore map[string]json.RawMessage
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&rawStore); err != nil {
+		return nil, fmt.Errorf("parse check state: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("parse check state: expected a single JSON value")
+	}
+	if rawStore == nil {
+		return nil, fmt.Errorf("parse check state: expected a JSON object")
+	}
+
+	store := make(map[string]checkState, len(rawStore))
+	for id, data := range rawStore {
+		var state checkState
+		valueDecoder := json.NewDecoder(bytes.NewReader(data))
+		valueDecoder.DisallowUnknownFields()
+		if err := valueDecoder.Decode(&state); err != nil {
+			var legacyTime time.Time
+			if legacyErr := json.Unmarshal(data, &legacyTime); legacyErr != nil {
+				return nil, fmt.Errorf("parse check state for %q: %w", id, err)
+			}
+			state.LastChecked = legacyTime
+		} else if err := valueDecoder.Decode(&struct{}{}); err != io.EOF {
+			return nil, fmt.Errorf("parse check state for %q: expected a single JSON value", id)
+		}
+		if state.ConsecutiveFailures < 0 {
+			return nil, fmt.Errorf("parse check state for %q: consecutive failures must not be negative", id)
+		}
+		store[id] = state
+	}
+	return store, nil
+}
+
+func saveCheckStore(path string, store map[string]checkState) error {
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode check state: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write check state: %w", err)
+	}
+	return nil
 }
 
 func runSuccessCommand(ctx context.Context, command *Command, anyUpdated bool) error {
@@ -948,15 +1089,30 @@ func runSuccessCommand(ctx context.Context, command *Command, anyUpdated bool) e
 	return nil
 }
 
-func downloadNotification(file Download, updated bool, downloadErr error) string {
+func downloadNotification(file Download, updated bool, downloadErr error, notifyFailure bool) string {
 	if !updated && downloadErr == nil {
 		return ""
 	}
 
 	if downloadErr != nil {
+		if !notifyFailure {
+			return ""
+		}
 		return fmt.Sprintf("Download failed: %s", file.Destination)
 	}
 	return fmt.Sprintf("File updated: %s", file.Destination)
+}
+
+func recordDownloadResult(file Download, state checkState, updated bool, downloadErr error) (checkState, string) {
+	if downloadErr != nil {
+		if state.ConsecutiveFailures < int(^uint(0)>>1) {
+			state.ConsecutiveFailures++
+		}
+	} else {
+		state.ConsecutiveFailures = 0
+	}
+	notifyFailure := state.ConsecutiveFailures > file.AcceptableFailures
+	return state, downloadNotification(file, updated, downloadErr, notifyFailure)
 }
 
 func notifyDownloadResults(ctx context.Context, client *http.Client, ntfyURL, ntfyPrefix string, notifications []string) error {
